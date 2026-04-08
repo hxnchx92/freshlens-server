@@ -16,6 +16,98 @@ app.get("/health", (_, res) => {
   res.json({ ok: true });
 });
 
+function pad(v) {
+  return String(v).padStart(2, "0");
+}
+
+function normalizeVisibleDate(raw) {
+  if (!raw || typeof raw !== "string") return null;
+
+  const cleaned = raw
+    .trim()
+    .replace(/\b(best before|use by|expiry|exp|bb|sell by)\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // ISO already
+  if (/^\d{4}-\d{2}-\d{2}$/.test(cleaned)) return cleaned;
+
+  // YYYY/MM/DD or YYYY.MM.DD
+  let m = cleaned.match(/^(\d{4})[\/.\- ](\d{2})[\/.\- ](\d{2})$/);
+  if (m) {
+    const yyyy = m[1];
+    const mm = m[2];
+    const dd = m[3];
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  // DD/MM/YY, DD-MM-YY, DD MM YY, DD.MM.YY
+  m = cleaned.match(/^(\d{1,2})[\/.\- ](\d{1,2})[\/.\- ](\d{2})$/);
+  if (m) {
+    const dd = pad(m[1]);
+    const mm = pad(m[2]);
+    const yy = Number(m[3]);
+    const yyyy = yy >= 70 ? `19${pad(yy)}` : `20${pad(yy)}`;
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  // DD/MM/YYYY, DD-MM-YYYY, DD MM YYYY, DD.MM.YYYY
+  m = cleaned.match(/^(\d{1,2})[\/.\- ](\d{1,2})[\/.\- ](\d{4})$/);
+  if (m) {
+    const dd = pad(m[1]);
+    const mm = pad(m[2]);
+    const yyyy = m[3];
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  const months = {
+    jan: "01", january: "01",
+    feb: "02", february: "02",
+    mar: "03", march: "03",
+    apr: "04", april: "04",
+    may: "05",
+    jun: "06", june: "06",
+    jul: "07", july: "07",
+    aug: "08", august: "08",
+    sep: "09", sept: "09", september: "09",
+    oct: "10", october: "10",
+    nov: "11", november: "11",
+    dec: "12", december: "12",
+  };
+
+  // 2 May 2026 / 02 MAY 26
+  m = cleaned.match(/^(\d{1,2})[ ,\-\/]+([A-Za-z]+)[ ,\-\/]+(\d{2}|\d{4})$/i);
+  if (m) {
+    const dd = pad(m[1]);
+    const monthKey = m[2].toLowerCase();
+    const mm = months[monthKey];
+    if (!mm) return null;
+    let yyyy = m[3];
+    if (yyyy.length === 2) {
+      const yy = Number(yyyy);
+      yyyy = yy >= 70 ? `19${pad(yy)}` : `20${pad(yy)}`;
+    }
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  // May 2 2026
+  m = cleaned.match(/^([A-Za-z]+)[ ,\-\/]+(\d{1,2})[ ,\-\/]+(\d{2}|\d{4})$/i);
+  if (m) {
+    const monthKey = m[1].toLowerCase();
+    const mm = months[monthKey];
+    if (!mm) return null;
+    const dd = pad(m[2]);
+    let yyyy = m[3];
+    if (yyyy.length === 2) {
+      const yy = Number(yyyy);
+      yyyy = yy >= 70 ? `19${pad(yy)}` : `20${pad(yy)}`;
+    }
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  return null;
+}
+
 app.post("/api/scan-grocery", async (req, res) => {
   try {
     const { imageBase64 } = req.body || {};
@@ -24,36 +116,40 @@ app.post("/api/scan-grocery", async (req, res) => {
       return res.status(400).json({ error: "imageBase64 required" });
     }
 
-    console.log("📸 Image length:", imageBase64.length);
-
     const dataUrl = `data:image/jpeg;base64,${imageBase64}`;
 
     const system = `
 You are the AI for a grocery expiry app.
+
 Return JSON only with keys:
 - itemName: string or null
 - category: one of dairy, meat, fish, produce, pantry, frozen, beverage, bakery, other
-- expiryDateISO: YYYY-MM-DD or null
+- rawDateText: string or null
+- dateLabel: one of use_by, expiry, best_before, sell_by, unknown
+- expiryDateISO: string or null
 - confidence: high | medium | low
 - notes: short string
 
 Rules:
-- Never guess a date.
-- Prefer Use By / Expiry over Best Before.
-- If the date is unclear, set expiryDateISO to null.
+- Read whatever visible date text is actually printed on the package.
+- Prefer Use By / Expiry over Best Before if multiple dates exist.
+- If only Best Before exists, use it.
+- rawDateText should contain the visible date exactly or almost exactly as printed.
+- If you are not fully certain how to convert the visible date into YYYY-MM-DD, set expiryDateISO to null but still return rawDateText.
+- Never invent a date not visible in the image.
 `;
 
     const response = await openai.chat.completions.create({
       model: MODEL,
       temperature: 0,
-      max_tokens: 300,
+      max_tokens: 400,
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: system },
         {
           role: "user",
           content: [
-            { type: "text", text: "Extract the grocery item and expiry date from this image." },
+            { type: "text", text: "Extract the grocery item name and printed date information from this image." },
             { type: "image_url", image_url: { url: dataUrl } }
           ]
         }
@@ -61,7 +157,7 @@ Rules:
     });
 
     const text = response.choices?.[0]?.message?.content || "{}";
-    console.log("🧠 AI RAW:", text);
+    console.log("AI RAW:", text);
 
     let parsed;
     try {
@@ -70,21 +166,37 @@ Rules:
       parsed = {
         itemName: null,
         category: "other",
+        rawDateText: null,
+        dateLabel: "unknown",
         expiryDateISO: null,
         confidence: "low",
         notes: "Invalid JSON from model."
       };
     }
 
-    if (parsed.expiryDateISO && !/^\\d{4}-\\d{2}-\\d{2}$/.test(parsed.expiryDateISO)) {
-      parsed.expiryDateISO = null;
-      parsed.confidence = "low";
-      parsed.notes = "Date format invalid or unclear.";
+    if (!parsed.expiryDateISO && parsed.rawDateText) {
+      parsed.expiryDateISO = normalizeVisibleDate(parsed.rawDateText);
     }
 
-    return res.json(parsed);
+    if (parsed.expiryDateISO && !/^\\d{4}-\\d{2}-\\d{2}$/.test(parsed.expiryDateISO)) {
+      parsed.expiryDateISO = normalizeVisibleDate(parsed.expiryDateISO);
+    }
+
+    if (!parsed.expiryDateISO) {
+      parsed.notes = parsed.notes || "Date could be read but not normalized.";
+    }
+
+    return res.json({
+      itemName: parsed.itemName || null,
+      category: parsed.category || "other",
+      rawDateText: parsed.rawDateText || null,
+      dateLabel: parsed.dateLabel || "unknown",
+      expiryDateISO: parsed.expiryDateISO || null,
+      confidence: parsed.confidence || "low",
+      notes: parsed.notes || ""
+    });
   } catch (e) {
-    console.error("🔥 Scan error:", e);
+    console.error("Scan error:", e);
     return res.status(500).json({ error: String(e) });
   }
 });
