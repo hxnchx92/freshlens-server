@@ -23,40 +23,35 @@ function pad(v) {
 function normalizeVisibleDate(raw) {
   if (!raw || typeof raw !== "string") return null;
 
-  const cleaned = raw
+  let cleaned = raw
     .trim()
     .replace(/\b(best before|use by|expiry|exp|bb|sell by)\b/gi, "")
+    .replace(/[^\w\s/.\-]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 
-  // ISO already
-  if (/^\d{4}-\d{2}-\d{2}$/.test(cleaned)) return cleaned;
+  // Handle DD MM YY / DD-MM-YY / DD/MM/YY / DD.MM.YY
+  // Also handles trailing batch codes by only matching the front date part
+  let m = cleaned.match(/^(\d{1,2})[\/.\- ](\d{1,2})[\/.\- ](\d{2,4})/);
+  if (m) {
+    const dd = pad(m[1]);
+    const mm = pad(m[2]);
+    let yyyy = String(m[3]);
 
-  // YYYY/MM/DD or YYYY.MM.DD
-  let m = cleaned.match(/^(\d{4})[\/.\- ](\d{2})[\/.\- ](\d{2})$/);
+    if (yyyy.length === 2) {
+      const yy = Number(yyyy);
+      yyyy = yy >= 70 ? `19${pad(yy)}` : `20${pad(yy)}`;
+    }
+
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  // Handle YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD
+  m = cleaned.match(/^(\d{4})[\/.\- ](\d{1,2})[\/.\- ](\d{1,2})$/);
   if (m) {
     const yyyy = m[1];
-    const mm = m[2];
-    const dd = m[3];
-    return `${yyyy}-${mm}-${dd}`;
-  }
-
-  // DD/MM/YY, DD-MM-YY, DD MM YY, DD.MM.YY
-  m = cleaned.match(/^(\d{1,2})[\/.\- ](\d{1,2})[\/.\- ](\d{2})$/);
-  if (m) {
-    const dd = pad(m[1]);
     const mm = pad(m[2]);
-    const yy = Number(m[3]);
-    const yyyy = yy >= 70 ? `19${pad(yy)}` : `20${pad(yy)}`;
-    return `${yyyy}-${mm}-${dd}`;
-  }
-
-  // DD/MM/YYYY, DD-MM-YYYY, DD MM YYYY, DD.MM.YYYY
-  m = cleaned.match(/^(\d{1,2})[\/.\- ](\d{1,2})[\/.\- ](\d{4})$/);
-  if (m) {
-    const dd = pad(m[1]);
-    const mm = pad(m[2]);
-    const yyyy = m[3];
+    const dd = pad(m[3]);
     return `${yyyy}-${mm}-${dd}`;
   }
 
@@ -75,36 +70,40 @@ function normalizeVisibleDate(raw) {
     dec: "12", december: "12",
   };
 
-  // 2 May 2026 / 02 MAY 26
+  // 16 Oct 26 / 16 October 2026
   m = cleaned.match(/^(\d{1,2})[ ,\-\/]+([A-Za-z]+)[ ,\-\/]+(\d{2}|\d{4})$/i);
   if (m) {
     const dd = pad(m[1]);
-    const monthKey = m[2].toLowerCase();
-    const mm = months[monthKey];
+    const mm = months[m[2].toLowerCase()];
     if (!mm) return null;
-    let yyyy = m[3];
+
+    let yyyy = String(m[3]);
     if (yyyy.length === 2) {
       const yy = Number(yyyy);
       yyyy = yy >= 70 ? `19${pad(yy)}` : `20${pad(yy)}`;
     }
+
     return `${yyyy}-${mm}-${dd}`;
   }
 
-  // May 2 2026
+  // Oct 16 26 / October 16 2026
   m = cleaned.match(/^([A-Za-z]+)[ ,\-\/]+(\d{1,2})[ ,\-\/]+(\d{2}|\d{4})$/i);
   if (m) {
-    const monthKey = m[1].toLowerCase();
-    const mm = months[monthKey];
+    const mm = months[m[1].toLowerCase()];
     if (!mm) return null;
+
     const dd = pad(m[2]);
-    let yyyy = m[3];
+    let yyyy = String(m[3]);
     if (yyyy.length === 2) {
       const yy = Number(yyyy);
       yyyy = yy >= 70 ? `19${pad(yy)}` : `20${pad(yy)}`;
     }
+
     return `${yyyy}-${mm}-${dd}`;
   }
 
+  // MM YY like "10 26" or "10/26" -> assume last day of month? No: too ambiguous, return null
+  // Keep it safe and don't guess.
   return null;
 }
 
@@ -123,7 +122,7 @@ You are the AI for a grocery expiry app.
 
 Return JSON only with keys:
 - itemName: string or null
-- category: one of dairy, meat, fish, produce, pantry, frozen, beverage, bakery, other
+- category: one of dairy, meat, fish, produce, pantry, frozen, beverage, bakery, snack, other
 - rawDateText: string or null
 - dateLabel: one of use_by, expiry, best_before, sell_by, unknown
 - expiryDateISO: string or null
@@ -135,8 +134,10 @@ Rules:
 - Prefer Use By / Expiry over Best Before if multiple dates exist.
 - If only Best Before exists, use it.
 - rawDateText should contain the visible date exactly or almost exactly as printed.
+- If a batch code appears after the date, include it in rawDateText if visible.
 - If you are not fully certain how to convert the visible date into YYYY-MM-DD, set expiryDateISO to null but still return rawDateText.
 - Never invent a date not visible in the image.
+- For itemName, prefer the front-of-pack product name if clearly visible. If not clear, return null.
 `;
 
     const response = await openai.chat.completions.create({
@@ -149,8 +150,14 @@ Rules:
         {
           role: "user",
           content: [
-            { type: "text", text: "Extract the grocery item name and printed date information from this image." },
-            { type: "image_url", image_url: { url: dataUrl } }
+            {
+              type: "text",
+              text: "Extract the grocery item name and printed date information from this image."
+            },
+            {
+              type: "image_url",
+              image_url: { url: dataUrl }
+            }
           ]
         }
       ]
@@ -178,12 +185,12 @@ Rules:
       parsed.expiryDateISO = normalizeVisibleDate(parsed.rawDateText);
     }
 
-    if (parsed.expiryDateISO && !/^\\d{4}-\\d{2}-\\d{2}$/.test(parsed.expiryDateISO)) {
+    if (parsed.expiryDateISO && !/^\d{4}-\d{2}-\d{2}$/.test(parsed.expiryDateISO)) {
       parsed.expiryDateISO = normalizeVisibleDate(parsed.expiryDateISO);
     }
 
     if (!parsed.expiryDateISO) {
-      parsed.notes = parsed.notes || "Date could be read but not normalized.";
+      parsed.notes = parsed.notes || "Date format is unclear; likely printed date detected but not normalized.";
     }
 
     return res.json({
