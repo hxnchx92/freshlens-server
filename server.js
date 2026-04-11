@@ -60,15 +60,22 @@ function detectDateLabel(raw, notes) {
   return "unknown";
 }
 
+function lastDayOfMonth(year, month) {
+  return new Date(year, month, 0).getDate();
+}
+
 /**
- * IMPORTANT RULE:
- * Only parse a year when it appears as its own clear date token,
- * not when it is embedded in a code like AY023 / B11 / LOT2023 etc.
+ * Rules:
+ * - Full dates -> YYYY-MM-DD
+ * - Month/year dates like 09/2026 -> use last day of month
+ * - Day/month with no year -> null
+ * - Ignore batch codes as years
  */
 function extractTrustedDate(raw) {
   if (!raw || typeof raw !== "string") {
     return {
       expiryDateISO: null,
+      partialDateText: null,
       notes: "No visible date text found.",
     };
   }
@@ -76,11 +83,11 @@ function extractTrustedDate(raw) {
   const text = raw.trim();
   const months = monthMap();
 
-  // Case 1: DD MM YY / DD-MM-YY / DD/MM/YY / DD.MM.YY
+  // 1) DD/MM/YY or DD-MM-YYYY
   let m = text.match(/\b(\d{1,2})[\/.\- ](\d{1,2})[\/.\- ](\d{2}|\d{4})\b/);
   if (m) {
-    const dd = pad(m[1]);
-    const mm = pad(m[2]);
+    const dd = Number(m[1]);
+    const mm = Number(m[2]);
     let yyyy = String(m[3]);
 
     if (yyyy.length === 2) {
@@ -89,32 +96,35 @@ function extractTrustedDate(raw) {
     }
 
     return {
-      expiryDateISO: `${yyyy}-${mm}-${dd}`,
+      expiryDateISO: `${yyyy}-${pad(mm)}-${pad(dd)}`,
+      partialDateText: null,
       notes: "",
     };
   }
 
-  // Case 2: YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD
+  // 2) YYYY-MM-DD
   m = text.match(/\b(\d{4})[\/.\- ](\d{1,2})[\/.\- ](\d{1,2})\b/);
   if (m) {
     const yyyy = m[1];
-    const mm = pad(m[2]);
-    const dd = pad(m[3]);
+    const mm = Number(m[2]);
+    const dd = Number(m[3]);
 
     return {
-      expiryDateISO: `${yyyy}-${mm}-${dd}`,
+      expiryDateISO: `${yyyy}-${pad(mm)}-${pad(dd)}`,
+      partialDateText: null,
       notes: "",
     };
   }
 
-  // Case 3: 27 APR 23 / 27 APR 2026
+  // 3) DD MON YY / DD MON YYYY
   m = text.match(/\b(\d{1,2})[ ,\/.\-]+([A-Za-z]{3,9})[ ,\/.\-]+(\d{2}|\d{4})\b/i);
   if (m) {
-    const dd = pad(m[1]);
+    const dd = Number(m[1]);
     const mon = months[m[2].toLowerCase()];
     if (!mon) {
       return {
         expiryDateISO: null,
+        partialDateText: null,
         notes: "Month text was unclear.",
       };
     }
@@ -126,23 +136,25 @@ function extractTrustedDate(raw) {
     }
 
     return {
-      expiryDateISO: `${yyyy}-${mon}-${dd}`,
+      expiryDateISO: `${yyyy}-${mon}-${pad(dd)}`,
+      partialDateText: null,
       notes: "",
     };
   }
 
-  // Case 4: APR 27 23 / APR 27 2026
+  // 4) MON DD YY / MON DD YYYY
   m = text.match(/\b([A-Za-z]{3,9})[ ,\/.\-]+(\d{1,2})[ ,\/.\-]+(\d{2}|\d{4})\b/i);
   if (m) {
     const mon = months[m[1].toLowerCase()];
     if (!mon) {
       return {
         expiryDateISO: null,
+        partialDateText: null,
         notes: "Month text was unclear.",
       };
     }
 
-    const dd = pad(m[2]);
+    const dd = Number(m[2]);
     let yyyy = String(m[3]);
     if (yyyy.length === 2) {
       const yy = Number(yyyy);
@@ -150,31 +162,67 @@ function extractTrustedDate(raw) {
     }
 
     return {
-      expiryDateISO: `${yyyy}-${mon}-${dd}`,
+      expiryDateISO: `${yyyy}-${mon}-${pad(dd)}`,
+      partialDateText: null,
       notes: "",
     };
   }
 
-  // Case 5: 27 APR (NO YEAR)
+  // 5) MM/YYYY or MM-YYYY -> use last day of month
+  m = text.match(/\b(\d{1,2})[\/.\- ](\d{4})\b/);
+  if (m) {
+    const mm = Number(m[1]);
+    const yyyy = Number(m[2]);
+
+    if (mm >= 1 && mm <= 12) {
+      const dd = lastDayOfMonth(yyyy, mm);
+      return {
+        expiryDateISO: `${yyyy}-${pad(mm)}-${pad(dd)}`,
+        partialDateText: text,
+        notes: "Month and year detected. Using the last day of that month.",
+      };
+    }
+  }
+
+  // 6) MON YYYY -> use last day of month
+  m = text.match(/\b([A-Za-z]{3,9})[ ,\/.\-]+(\d{4})\b/i);
+  if (m) {
+    const mon = months[m[1].toLowerCase()];
+    const yyyy = Number(m[2]);
+
+    if (mon) {
+      const dd = lastDayOfMonth(yyyy, Number(mon));
+      return {
+        expiryDateISO: `${yyyy}-${mon}-${pad(dd)}`,
+        partialDateText: text,
+        notes: "Month and year detected. Using the last day of that month.",
+      };
+    }
+  }
+
+  // 7) DD MON -> no year
   m = text.match(/\b(\d{1,2})[ ,\/.\-]+([A-Za-z]{3,9})\b/i);
   if (m) {
     return {
       expiryDateISO: null,
+      partialDateText: text,
       notes: "Day and month detected, but year is not visible.",
     };
   }
 
-  // Case 6: APR 27 (NO YEAR)
+  // 8) MON DD -> no year
   m = text.match(/\b([A-Za-z]{3,9})[ ,\/.\-]+(\d{1,2})\b/i);
   if (m) {
     return {
       expiryDateISO: null,
+      partialDateText: text,
       notes: "Month and day detected, but year is not visible.",
     };
   }
 
   return {
     expiryDateISO: null,
+    partialDateText: null,
     notes: "Date format is unclear or incomplete.",
   };
 }
@@ -205,7 +253,8 @@ Rules:
 - Read only what is clearly visible.
 - Never invent a year.
 - Never convert a batch code or lot code into a year.
-- If you see "27 APR" and no clear year next to it, rawDateText should be "27 APR" and expiryDateISO must be null.
+- If you see 09/2026, keep rawDateText as 09/2026.
+- If you see 27 APR and no clear year, keep rawDateText as 27 APR and expiryDateISO must be null.
 - Ignore batch codes, timestamps, lot numbers, and manufacturing codes unless they are clearly part of the printed expiry date.
 - For itemName, prefer the product name if clearly visible.
 `;
@@ -223,7 +272,7 @@ Rules:
             {
               type: "text",
               text:
-                "Extract the grocery item name and printed expiry information from this image. Do not treat batch codes like AY023 as a year. Only use a year if it is clearly printed as part of the date.",
+                "Extract the grocery item name and printed expiry information from this image. Treat month/year dates like 09/2026 as valid. Do not treat batch codes as years.",
             },
             {
               type: "image_url",
@@ -262,6 +311,7 @@ Rules:
       expiryDateISO: trusted.expiryDateISO,
       confidence: trusted.expiryDateISO ? parsed.confidence || "medium" : "medium",
       notes: trusted.notes || parsed.notes || "",
+      partialDateText: trusted.partialDateText || null,
     });
   } catch (e) {
     console.error("Scan error:", e);
