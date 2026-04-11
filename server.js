@@ -20,6 +20,19 @@ function pad(v) {
   return String(v).padStart(2, "0");
 }
 
+function hasVisibleYear(raw) {
+  if (!raw || typeof raw !== "string") return false;
+
+  const cleaned = raw.trim();
+
+  if (/\b\d{4}\b/.test(cleaned)) return true;
+  if (/\b\d{2}\b/.test(cleaned) && /(\d{1,2})[\/.\- ](\d{1,2})[\/.\- ](\d{2})/.test(cleaned)) return true;
+  if (/([A-Za-z]+)[ ,\-\/]+(\d{1,2})[ ,\-\/]+(\d{2}|\d{4})/i.test(cleaned)) return true;
+  if (/(\d{1,2})[ ,\-\/]+([A-Za-z]+)[ ,\-\/]+(\d{2}|\d{4})/i.test(cleaned)) return true;
+
+  return false;
+}
+
 function normalizeVisibleDate(raw) {
   if (!raw || typeof raw !== "string") return null;
 
@@ -30,8 +43,7 @@ function normalizeVisibleDate(raw) {
     .replace(/\s+/g, " ")
     .trim();
 
-  // Handle DD MM YY / DD-MM-YY / DD/MM/YY / DD.MM.YY
-  // Also handles trailing batch codes by only matching the front date part
+  // DD MM YY / DD-MM-YY / DD/MM/YY / DD.MM.YY
   let m = cleaned.match(/^(\d{1,2})[\/.\- ](\d{1,2})[\/.\- ](\d{2,4})/);
   if (m) {
     const dd = pad(m[1]);
@@ -46,7 +58,7 @@ function normalizeVisibleDate(raw) {
     return `${yyyy}-${mm}-${dd}`;
   }
 
-  // Handle YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD
+  // YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD
   m = cleaned.match(/^(\d{4})[\/.\- ](\d{1,2})[\/.\- ](\d{1,2})$/);
   if (m) {
     const yyyy = m[1];
@@ -102,9 +114,20 @@ function normalizeVisibleDate(raw) {
     return `${yyyy}-${mm}-${dd}`;
   }
 
-  // MM YY like "10 26" or "10/26" -> assume last day of month? No: too ambiguous, return null
-  // Keep it safe and don't guess.
+  // IMPORTANT:
+  // If only day + month is visible like "27 APR", do NOT guess year.
   return null;
+}
+
+function detectDateLabel(raw, notes) {
+  const text = `${raw || ""} ${notes || ""}`.toLowerCase();
+
+  if (text.includes("use by")) return "use_by";
+  if (text.includes("best before")) return "best_before";
+  if (text.includes("expiry")) return "expiry";
+  if (text.includes("sell by")) return "sell_by";
+
+  return "unknown";
 }
 
 app.post("/api/scan-grocery", async (req, res) => {
@@ -130,12 +153,13 @@ Return JSON only with keys:
 - notes: short string
 
 Rules:
-- Read whatever visible date text is actually printed on the package.
+- Read only what is actually visible in the image.
+- Never invent a year if the year is not visible.
+- If the image only shows day and month, set expiryDateISO to null.
 - Prefer Use By / Expiry over Best Before if multiple dates exist.
 - If only Best Before exists, use it.
-- rawDateText should contain the visible date exactly or almost exactly as printed.
-- If a batch code appears after the date, include it in rawDateText if visible.
-- If you are not fully certain how to convert the visible date into YYYY-MM-DD, set expiryDateISO to null but still return rawDateText.
+- rawDateText should contain the visible printed date as closely as possible.
+- If there is no clearly visible year, expiryDateISO must be null.
 - Never invent a date not visible in the image.
 - For itemName, prefer the front-of-pack product name if clearly visible. If not clear, return null.
 `;
@@ -152,7 +176,7 @@ Rules:
           content: [
             {
               type: "text",
-              text: "Extract the grocery item name and printed date information from this image."
+              text: "Extract the grocery item name and printed expiry information from this image. If the year is not visible, do not guess it."
             },
             {
               type: "image_url",
@@ -181,7 +205,14 @@ Rules:
       };
     }
 
-    if (!parsed.expiryDateISO && parsed.rawDateText) {
+    parsed.dateLabel = detectDateLabel(parsed.rawDateText, parsed.notes) || parsed.dateLabel || "unknown";
+
+    // If raw date has no visible year, force ISO to null
+    if (parsed.rawDateText && !hasVisibleYear(parsed.rawDateText)) {
+      parsed.expiryDateISO = null;
+      parsed.notes = "Day and month detected, but year is not visible.";
+      parsed.confidence = "medium";
+    } else if (!parsed.expiryDateISO && parsed.rawDateText) {
       parsed.expiryDateISO = normalizeVisibleDate(parsed.rawDateText);
     }
 
@@ -189,8 +220,8 @@ Rules:
       parsed.expiryDateISO = normalizeVisibleDate(parsed.expiryDateISO);
     }
 
-    if (!parsed.expiryDateISO) {
-      parsed.notes = parsed.notes || "Date format is unclear; likely printed date detected but not normalized.";
+    if (!parsed.expiryDateISO && !parsed.notes) {
+      parsed.notes = "Date format is unclear or incomplete.";
     }
 
     return res.json({
