@@ -20,103 +20,33 @@ function pad(v) {
   return String(v).padStart(2, "0");
 }
 
-function hasVisibleYear(raw) {
-  if (!raw || typeof raw !== "string") return false;
-
-  const cleaned = raw.trim();
-
-  if (/\b\d{4}\b/.test(cleaned)) return true;
-  if (/\b\d{2}\b/.test(cleaned) && /(\d{1,2})[\/.\- ](\d{1,2})[\/.\- ](\d{2})/.test(cleaned)) return true;
-  if (/([A-Za-z]+)[ ,\-\/]+(\d{1,2})[ ,\-\/]+(\d{2}|\d{4})/i.test(cleaned)) return true;
-  if (/(\d{1,2})[ ,\-\/]+([A-Za-z]+)[ ,\-\/]+(\d{2}|\d{4})/i.test(cleaned)) return true;
-
-  return false;
-}
-
-function normalizeVisibleDate(raw) {
-  if (!raw || typeof raw !== "string") return null;
-
-  let cleaned = raw
-    .trim()
-    .replace(/\b(best before|use by|expiry|exp|bb|sell by)\b/gi, "")
-    .replace(/[^\w\s/.\-]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  // DD MM YY / DD-MM-YY / DD/MM/YY / DD.MM.YY
-  let m = cleaned.match(/^(\d{1,2})[\/.\- ](\d{1,2})[\/.\- ](\d{2,4})/);
-  if (m) {
-    const dd = pad(m[1]);
-    const mm = pad(m[2]);
-    let yyyy = String(m[3]);
-
-    if (yyyy.length === 2) {
-      const yy = Number(yyyy);
-      yyyy = yy >= 70 ? `19${pad(yy)}` : `20${pad(yy)}`;
-    }
-
-    return `${yyyy}-${mm}-${dd}`;
-  }
-
-  // YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD
-  m = cleaned.match(/^(\d{4})[\/.\- ](\d{1,2})[\/.\- ](\d{1,2})$/);
-  if (m) {
-    const yyyy = m[1];
-    const mm = pad(m[2]);
-    const dd = pad(m[3]);
-    return `${yyyy}-${mm}-${dd}`;
-  }
-
-  const months = {
-    jan: "01", january: "01",
-    feb: "02", february: "02",
-    mar: "03", march: "03",
-    apr: "04", april: "04",
+function monthMap() {
+  return {
+    jan: "01",
+    january: "01",
+    feb: "02",
+    february: "02",
+    mar: "03",
+    march: "03",
+    apr: "04",
+    april: "04",
     may: "05",
-    jun: "06", june: "06",
-    jul: "07", july: "07",
-    aug: "08", august: "08",
-    sep: "09", sept: "09", september: "09",
-    oct: "10", october: "10",
-    nov: "11", november: "11",
-    dec: "12", december: "12",
+    jun: "06",
+    june: "06",
+    jul: "07",
+    july: "07",
+    aug: "08",
+    august: "08",
+    sep: "09",
+    sept: "09",
+    september: "09",
+    oct: "10",
+    october: "10",
+    nov: "11",
+    november: "11",
+    dec: "12",
+    december: "12",
   };
-
-  // 16 Oct 26 / 16 October 2026
-  m = cleaned.match(/^(\d{1,2})[ ,\-\/]+([A-Za-z]+)[ ,\-\/]+(\d{2}|\d{4})$/i);
-  if (m) {
-    const dd = pad(m[1]);
-    const mm = months[m[2].toLowerCase()];
-    if (!mm) return null;
-
-    let yyyy = String(m[3]);
-    if (yyyy.length === 2) {
-      const yy = Number(yyyy);
-      yyyy = yy >= 70 ? `19${pad(yy)}` : `20${pad(yy)}`;
-    }
-
-    return `${yyyy}-${mm}-${dd}`;
-  }
-
-  // Oct 16 26 / October 16 2026
-  m = cleaned.match(/^([A-Za-z]+)[ ,\-\/]+(\d{1,2})[ ,\-\/]+(\d{2}|\d{4})$/i);
-  if (m) {
-    const mm = months[m[1].toLowerCase()];
-    if (!mm) return null;
-
-    const dd = pad(m[2]);
-    let yyyy = String(m[3]);
-    if (yyyy.length === 2) {
-      const yy = Number(yyyy);
-      yyyy = yy >= 70 ? `19${pad(yy)}` : `20${pad(yy)}`;
-    }
-
-    return `${yyyy}-${mm}-${dd}`;
-  }
-
-  // IMPORTANT:
-  // If only day + month is visible like "27 APR", do NOT guess year.
-  return null;
 }
 
 function detectDateLabel(raw, notes) {
@@ -128,6 +58,125 @@ function detectDateLabel(raw, notes) {
   if (text.includes("sell by")) return "sell_by";
 
   return "unknown";
+}
+
+/**
+ * IMPORTANT RULE:
+ * Only parse a year when it appears as its own clear date token,
+ * not when it is embedded in a code like AY023 / B11 / LOT2023 etc.
+ */
+function extractTrustedDate(raw) {
+  if (!raw || typeof raw !== "string") {
+    return {
+      expiryDateISO: null,
+      notes: "No visible date text found.",
+    };
+  }
+
+  const text = raw.trim();
+  const months = monthMap();
+
+  // Case 1: DD MM YY / DD-MM-YY / DD/MM/YY / DD.MM.YY
+  let m = text.match(/\b(\d{1,2})[\/.\- ](\d{1,2})[\/.\- ](\d{2}|\d{4})\b/);
+  if (m) {
+    const dd = pad(m[1]);
+    const mm = pad(m[2]);
+    let yyyy = String(m[3]);
+
+    if (yyyy.length === 2) {
+      const yy = Number(yyyy);
+      yyyy = yy >= 70 ? `19${pad(yy)}` : `20${pad(yy)}`;
+    }
+
+    return {
+      expiryDateISO: `${yyyy}-${mm}-${dd}`,
+      notes: "",
+    };
+  }
+
+  // Case 2: YYYY-MM-DD / YYYY/MM/DD / YYYY.MM.DD
+  m = text.match(/\b(\d{4})[\/.\- ](\d{1,2})[\/.\- ](\d{1,2})\b/);
+  if (m) {
+    const yyyy = m[1];
+    const mm = pad(m[2]);
+    const dd = pad(m[3]);
+
+    return {
+      expiryDateISO: `${yyyy}-${mm}-${dd}`,
+      notes: "",
+    };
+  }
+
+  // Case 3: 27 APR 23 / 27 APR 2026
+  m = text.match(/\b(\d{1,2})[ ,\/.\-]+([A-Za-z]{3,9})[ ,\/.\-]+(\d{2}|\d{4})\b/i);
+  if (m) {
+    const dd = pad(m[1]);
+    const mon = months[m[2].toLowerCase()];
+    if (!mon) {
+      return {
+        expiryDateISO: null,
+        notes: "Month text was unclear.",
+      };
+    }
+
+    let yyyy = String(m[3]);
+    if (yyyy.length === 2) {
+      const yy = Number(yyyy);
+      yyyy = yy >= 70 ? `19${pad(yy)}` : `20${pad(yy)}`;
+    }
+
+    return {
+      expiryDateISO: `${yyyy}-${mon}-${dd}`,
+      notes: "",
+    };
+  }
+
+  // Case 4: APR 27 23 / APR 27 2026
+  m = text.match(/\b([A-Za-z]{3,9})[ ,\/.\-]+(\d{1,2})[ ,\/.\-]+(\d{2}|\d{4})\b/i);
+  if (m) {
+    const mon = months[m[1].toLowerCase()];
+    if (!mon) {
+      return {
+        expiryDateISO: null,
+        notes: "Month text was unclear.",
+      };
+    }
+
+    const dd = pad(m[2]);
+    let yyyy = String(m[3]);
+    if (yyyy.length === 2) {
+      const yy = Number(yyyy);
+      yyyy = yy >= 70 ? `19${pad(yy)}` : `20${pad(yy)}`;
+    }
+
+    return {
+      expiryDateISO: `${yyyy}-${mon}-${dd}`,
+      notes: "",
+    };
+  }
+
+  // Case 5: 27 APR (NO YEAR)
+  m = text.match(/\b(\d{1,2})[ ,\/.\-]+([A-Za-z]{3,9})\b/i);
+  if (m) {
+    return {
+      expiryDateISO: null,
+      notes: "Day and month detected, but year is not visible.",
+    };
+  }
+
+  // Case 6: APR 27 (NO YEAR)
+  m = text.match(/\b([A-Za-z]{3,9})[ ,\/.\-]+(\d{1,2})\b/i);
+  if (m) {
+    return {
+      expiryDateISO: null,
+      notes: "Month and day detected, but year is not visible.",
+    };
+  }
+
+  return {
+    expiryDateISO: null,
+    notes: "Date format is unclear or incomplete.",
+  };
 }
 
 app.post("/api/scan-grocery", async (req, res) => {
@@ -153,15 +202,12 @@ Return JSON only with keys:
 - notes: short string
 
 Rules:
-- Read only what is actually visible in the image.
-- Never invent a year if the year is not visible.
-- If the image only shows day and month, set expiryDateISO to null.
-- Prefer Use By / Expiry over Best Before if multiple dates exist.
-- If only Best Before exists, use it.
-- rawDateText should contain the visible printed date as closely as possible.
-- If there is no clearly visible year, expiryDateISO must be null.
-- Never invent a date not visible in the image.
-- For itemName, prefer the front-of-pack product name if clearly visible. If not clear, return null.
+- Read only what is clearly visible.
+- Never invent a year.
+- Never convert a batch code or lot code into a year.
+- If you see "27 APR" and no clear year next to it, rawDateText should be "27 APR" and expiryDateISO must be null.
+- Ignore batch codes, timestamps, lot numbers, and manufacturing codes unless they are clearly part of the printed expiry date.
+- For itemName, prefer the product name if clearly visible.
 `;
 
     const response = await openai.chat.completions.create({
@@ -176,15 +222,16 @@ Rules:
           content: [
             {
               type: "text",
-              text: "Extract the grocery item name and printed expiry information from this image. If the year is not visible, do not guess it."
+              text:
+                "Extract the grocery item name and printed expiry information from this image. Do not treat batch codes like AY023 as a year. Only use a year if it is clearly printed as part of the date.",
             },
             {
               type: "image_url",
-              image_url: { url: dataUrl }
-            }
-          ]
-        }
-      ]
+              image_url: { url: dataUrl },
+            },
+          ],
+        },
+      ],
     });
 
     const text = response.choices?.[0]?.message?.content || "{}";
@@ -201,37 +248,20 @@ Rules:
         dateLabel: "unknown",
         expiryDateISO: null,
         confidence: "low",
-        notes: "Invalid JSON from model."
+        notes: "Invalid JSON from model.",
       };
     }
 
-    parsed.dateLabel = detectDateLabel(parsed.rawDateText, parsed.notes) || parsed.dateLabel || "unknown";
-
-    // If raw date has no visible year, force ISO to null
-    if (parsed.rawDateText && !hasVisibleYear(parsed.rawDateText)) {
-      parsed.expiryDateISO = null;
-      parsed.notes = "Day and month detected, but year is not visible.";
-      parsed.confidence = "medium";
-    } else if (!parsed.expiryDateISO && parsed.rawDateText) {
-      parsed.expiryDateISO = normalizeVisibleDate(parsed.rawDateText);
-    }
-
-    if (parsed.expiryDateISO && !/^\d{4}-\d{2}-\d{2}$/.test(parsed.expiryDateISO)) {
-      parsed.expiryDateISO = normalizeVisibleDate(parsed.expiryDateISO);
-    }
-
-    if (!parsed.expiryDateISO && !parsed.notes) {
-      parsed.notes = "Date format is unclear or incomplete.";
-    }
+    const trusted = extractTrustedDate(parsed.rawDateText);
 
     return res.json({
       itemName: parsed.itemName || null,
       category: parsed.category || "other",
       rawDateText: parsed.rawDateText || null,
-      dateLabel: parsed.dateLabel || "unknown",
-      expiryDateISO: parsed.expiryDateISO || null,
-      confidence: parsed.confidence || "low",
-      notes: parsed.notes || ""
+      dateLabel: detectDateLabel(parsed.rawDateText, parsed.notes || parsed.dateLabel) || "unknown",
+      expiryDateISO: trusted.expiryDateISO,
+      confidence: trusted.expiryDateISO ? parsed.confidence || "medium" : "medium",
+      notes: trusted.notes || parsed.notes || "",
     });
   } catch (e) {
     console.error("Scan error:", e);
