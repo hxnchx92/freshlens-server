@@ -21,18 +21,6 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-if (!SUPABASE_URL) {
-  console.warn("Missing SUPABASE_URL in server environment");
-}
-
-if (!SUPABASE_ANON_KEY) {
-  console.warn("Missing SUPABASE_ANON_KEY in server environment");
-}
-
-if (!SUPABASE_SERVICE_ROLE_KEY) {
-  console.warn("Missing SUPABASE_SERVICE_ROLE_KEY in server environment");
-}
-
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -45,8 +33,14 @@ function cleanJsonText(text = "") {
 }
 
 function safeJsonParse(text) {
-  const cleaned = cleanJsonText(text);
-  return JSON.parse(cleaned);
+  return JSON.parse(cleanJsonText(text));
+}
+
+function normalizeWhitespace(text = "") {
+  return String(text || "")
+    .replace(/[|]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function monthNameToNumber(input = "") {
@@ -54,18 +48,29 @@ function monthNameToNumber(input = "") {
 
   const map = {
     JAN: "01",
+    JANUARY: "01",
     FEB: "02",
+    FEBRUARY: "02",
     MAR: "03",
+    MARCH: "03",
     APR: "04",
+    APRIL: "04",
     MAY: "05",
     JUN: "06",
+    JUNE: "06",
     JUL: "07",
+    JULY: "07",
     AUG: "08",
+    AUGUST: "08",
     SEP: "09",
     SEPT: "09",
+    SEPTEMBER: "09",
     OCT: "10",
+    OCTOBER: "10",
     NOV: "11",
+    NOVEMBER: "11",
     DEC: "12",
+    DECEMBER: "12",
   };
 
   return map[m] || null;
@@ -80,11 +85,7 @@ function isValidYMD(year, month, day) {
   const mm = Number(month);
   const dd = Number(day);
 
-  if (
-    !Number.isInteger(yyyy) ||
-    !Number.isInteger(mm) ||
-    !Number.isInteger(dd)
-  ) {
+  if (!Number.isInteger(yyyy) || !Number.isInteger(mm) || !Number.isInteger(dd)) {
     return false;
   }
 
@@ -104,34 +105,35 @@ function toIso(year, month, day) {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-function normalizeWhitespace(text = "") {
-  return String(text || "")
-    .replace(/[|]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 function pickFutureOrCurrentYear(month, day) {
   const now = new Date();
   const currentYear = now.getFullYear();
 
-  const thisYearCandidate = new Date(
-    currentYear,
-    Number(month) - 1,
-    Number(day)
-  );
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const candidate = new Date(currentYear, Number(month) - 1, Number(day));
+  const today = new Date(currentYear, now.getMonth(), now.getDate());
 
-  if (thisYearCandidate >= today) {
-    return String(currentYear);
-  }
-
-  return String(currentYear + 1);
+  return candidate >= today ? String(currentYear) : String(currentYear + 1);
 }
 
 function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
   const original = String(rawDateText || "").trim();
-  const text = normalizeWhitespace(original).toUpperCase();
+
+  let text = normalizeWhitespace(original).toUpperCase();
+
+  text = text
+    .replace(/BEST\s*(IF\s*)?(USED\s*)?BY/g, " ")
+    .replace(/USE\s*BY/g, " ")
+    .replace(/USED\s*BY/g, " ")
+    .replace(/EXPIRY/g, " ")
+    .replace(/EXPIRES/g, " ")
+    .replace(/EXP/g, " ")
+    .replace(/BBE/g, " ")
+    .replace(/BB/g, " ")
+    .replace(/LOT/g, " ")
+    .replace(/BATCH/g, " ")
+    .replace(/:/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
   if (!text) {
     return {
@@ -144,8 +146,120 @@ function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
 
   let m;
 
-  // 1) DAY + MONTH, e.g. 14 APR
-  m = text.match(/\b(\d{1,2})\s+([A-Z]{3,4})\b/);
+  // 1) 21 MAR2027 / 21MAR2027 / 21 MAR 2027
+  m = text.match(/\b(\d{1,2})\s*([A-Z]{3,9})\s*(20\d{2}|\d{2})\b/);
+  if (m) {
+    const day = String(m[1]).padStart(2, "0");
+    const month = monthNameToNumber(m[2]);
+    let year = String(m[3]);
+
+    if (year.length === 2) year = `20${year}`;
+
+    if (month && isValidYMD(year, month, day)) {
+      return {
+        rawDateText: original,
+        expiryDateISO: toIso(year, month, day),
+        partialDateText: "",
+        notes:
+          dateLabel === "best_before"
+            ? "Best before date found."
+            : dateLabel === "use_by"
+            ? "Use by date found."
+            : "Printed date found.",
+      };
+    }
+  }
+
+  // 2) MAR 21 2027 / MAR21 2027
+  m = text.match(/\b([A-Z]{3,9})\s*(\d{1,2})\s*(20\d{2}|\d{2})\b/);
+  if (m) {
+    const month = monthNameToNumber(m[1]);
+    const day = String(m[2]).padStart(2, "0");
+    let year = String(m[3]);
+
+    if (year.length === 2) year = `20${year}`;
+
+    if (month && isValidYMD(year, month, day)) {
+      return {
+        rawDateText: original,
+        expiryDateISO: toIso(year, month, day),
+        partialDateText: "",
+        notes: "Printed date found.",
+      };
+    }
+  }
+
+  // 3) ISO: 2027-03-21 / 2027/03/21
+  m = text.match(/\b(20\d{2})[\/\-.](\d{1,2})[\/\-.](\d{1,2})\b/);
+  if (m) {
+    const year = String(m[1]);
+    const month = String(m[2]).padStart(2, "0");
+    const day = String(m[3]).padStart(2, "0");
+
+    if (isValidYMD(year, month, day)) {
+      return {
+        rawDateText: original,
+        expiryDateISO: toIso(year, month, day),
+        partialDateText: "",
+        notes: "ISO date format found.",
+      };
+    }
+  }
+
+  // 4) UK/US numeric: 21/03/27 or 03/21/27
+  m = text.match(/\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})\b/);
+  if (m) {
+    const first = Number(m[1]);
+    const second = Number(m[2]);
+    let year = String(m[3]);
+
+    if (year.length === 2) year = `20${year}`;
+
+    let day;
+    let month;
+
+    if (first > 12) {
+      day = String(first).padStart(2, "0");
+      month = String(second).padStart(2, "0");
+    } else if (second > 12) {
+      month = String(first).padStart(2, "0");
+      day = String(second).padStart(2, "0");
+    } else {
+      day = String(first).padStart(2, "0");
+      month = String(second).padStart(2, "0");
+    }
+
+    if (isValidYMD(year, month, day)) {
+      return {
+        rawDateText: original,
+        expiryDateISO: toIso(year, month, day),
+        partialDateText: "",
+        notes: "Numeric date format found.",
+      };
+    }
+  }
+
+  // 5) Spaced numeric: 21 03 27
+  m = text.match(/\b(\d{1,2})\s+(\d{1,2})\s+(20\d{2}|\d{2})\b/);
+  if (m) {
+    const day = String(m[1]).padStart(2, "0");
+    const month = String(m[2]).padStart(2, "0");
+    let year = String(m[3]);
+
+    if (year.length === 2) year = `20${year}`;
+
+    if (isValidYMD(year, month, day)) {
+      return {
+        rawDateText: original,
+        expiryDateISO: toIso(year, month, day),
+        partialDateText: "",
+        notes: "Spaced numeric date found.",
+      };
+    }
+  }
+
+  // 6) 21 MAR with no year
+  m = text.match(/\b(\d{1,2})\s*([A-Z]{3,9})\b/);
   if (m) {
     const day = String(m[1]).padStart(2, "0");
     const month = monthNameToNumber(m[2]);
@@ -158,146 +272,66 @@ function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
           rawDateText: original,
           expiryDateISO: toIso(year, month, day),
           partialDateText: "",
-          notes:
-            dateLabel === "use_by"
-              ? "Use by date found."
-              : dateLabel === "best_before"
-              ? "Best before date found."
-              : "Printed date found.",
+          notes: "Day and month found. Year assumed.",
         };
       }
     }
   }
 
-  // 2) DD/MM/YY or DD-MM-YYYY or DD.MM.YYYY
-  m = text.match(/\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})\b/);
-  if (m) {
-    const day = String(m[1]).padStart(2, "0");
-    const month = String(m[2]).padStart(2, "0");
-    let year = String(m[3]);
-
-    if (year.length === 2) {
-      year = `20${year}`;
-    }
-
-    if (isValidYMD(year, month, day)) {
-      return {
-        rawDateText: original,
-        expiryDateISO: toIso(year, month, day),
-        partialDateText: "",
-        notes:
-          dateLabel === "use_by"
-            ? "Use by date found."
-            : "Best before or printed date found.",
-      };
-    }
-  }
-
-  // 3) DD MM YY or DD MM YYYY
-  m = text.match(/\b(\d{1,2})\s+(\d{1,2})\s+(\d{2,4})\b/);
-  if (m) {
-    const day = String(m[1]).padStart(2, "0");
-    const month = String(m[2]).padStart(2, "0");
-    let year = String(m[3]);
-
-    if (year.length === 2) {
-      year = `20${year}`;
-    }
-
-    if (isValidYMD(year, month, day)) {
-      return {
-        rawDateText: original,
-        expiryDateISO: toIso(year, month, day),
-        partialDateText: "",
-        notes:
-          dateLabel === "use_by"
-            ? "Use by date found."
-            : "Best before or printed date found.",
-      };
-    }
-  }
-
-  // 4) MONTH YY, e.g. OCT 27
-  m = text.match(/\b([A-Z]{3,4})\s+(\d{2})\b/);
+  // 7) MAR 2027 / MAR27 / OCT26
+  m = text.match(/\b([A-Z]{3,9})\s*(20\d{2}|\d{2})\b/);
   if (m) {
     const month = monthNameToNumber(m[1]);
-    const year = `20${m[2]}`;
+    let year = String(m[2]);
+
+    if (year.length === 2) year = `20${year}`;
 
     if (month) {
       const lastDay = daysInMonth(year, month);
-      return {
-        rawDateText: original,
-        expiryDateISO: toIso(year, month, lastDay),
-        partialDateText: `${m[1]} ${m[2]}`,
-        notes: "Best before month/year found. End of month assumed.",
-      };
-    }
-  }
 
-  // 5) MM/YYYY or MM-YYYY or MM.YYYY
-  m = text.match(/\b(\d{1,2})[\/\-.](\d{4})\b/);
-  if (m) {
-    const month = String(m[1]).padStart(2, "0");
-    const year = String(m[2]);
-
-    if (Number(month) >= 1 && Number(month) <= 12) {
-      const lastDay = daysInMonth(year, month);
-      return {
-        rawDateText: original,
-        expiryDateISO: toIso(year, month, lastDay),
-        partialDateText: `${month}/${year}`,
-        notes: "Best before month/year found. End of month assumed.",
-      };
-    }
-  }
-
-  // 6) MM YYYY
-  m = text.match(/\b(\d{1,2})\s+(\d{4})\b/);
-  if (m) {
-    const month = String(m[1]).padStart(2, "0");
-    const year = String(m[2]);
-
-    if (Number(month) >= 1 && Number(month) <= 12) {
-      const lastDay = daysInMonth(year, month);
-      return {
-        rawDateText: original,
-        expiryDateISO: toIso(year, month, lastDay),
-        partialDateText: `${month} ${year}`,
-        notes: "Best before month/year found. End of month assumed.",
-      };
-    }
-  }
-
-  // 7) END: DEC 2026 or DEC 2026
-  m = text.match(/\b(?:END[:\s]*)?([A-Z]{3,4})\s+(\d{4})\b/);
-  if (m) {
-    const month = monthNameToNumber(m[1]);
-    const year = String(m[2]);
-
-    if (month) {
-      const lastDay = daysInMonth(year, month);
       return {
         rawDateText: original,
         expiryDateISO: toIso(year, month, lastDay),
         partialDateText: `${m[1]} ${year}`,
-        notes: "Best before month/year found. End of month assumed.",
+        notes: "Month/year found. End of month assumed.",
       };
     }
   }
 
-  // 8) E01 2027 / E03 2027 / EO1 2027
-  m = text.match(/\bE[O0]?(\d{1,2})\s*(\d{4})\b/);
+  // 8) MM/YYYY or MM-YYYY
+  m = text.match(/\b(\d{1,2})[\/\-.](20\d{2})\b/);
   if (m) {
     const month = String(m[1]).padStart(2, "0");
     const year = String(m[2]);
 
     if (Number(month) >= 1 && Number(month) <= 12) {
       const lastDay = daysInMonth(year, month);
+
       return {
         rawDateText: original,
         expiryDateISO: toIso(year, month, lastDay),
-        partialDateText: `E${month} ${year}`,
-        notes: "Best before month/year found. End of month assumed.",
+        partialDateText: `${month}/${year}`,
+        notes: "Month/year numeric format found. End of month assumed.",
+      };
+    }
+  }
+
+  // 9) Codes like 05OCT26 / 050CT26
+  m = text.match(/\b(\d{1,2})\s*(0CT|OCT|JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|NOV|DEC)\s*(\d{2,4})\b/);
+  if (m) {
+    const day = String(m[1]).padStart(2, "0");
+    const monthText = m[2].replace("0CT", "OCT");
+    const month = monthNameToNumber(monthText);
+    let year = String(m[3]);
+
+    if (year.length === 2) year = `20${year}`;
+
+    if (month && isValidYMD(year, month, day)) {
+      return {
+        rawDateText: original,
+        expiryDateISO: toIso(year, month, day),
+        partialDateText: "",
+        notes: "Printed date code found.",
       };
     }
   }
@@ -355,53 +389,47 @@ Return VALID JSON ONLY.
 No markdown.
 No code fences.
 
-There are two possible scan types:
+There are two scan types:
 
 1. PRODUCT SCAN
-- extract product name
-- write a short helpful note about what the item is
-
-2. EXPIRY SCAN
-- extract the printed date text exactly as visible
-- identify the date label
-
-Date label rules:
-- "use_by" = safety date
-- "best_before" = quality date
-- "printed_date" = visible printed date but label not clearly shown
-- "unknown" = no clear label
-
-Important date guidance:
-- Use By common formats:
-  - 15 APR
-  - 15/04/26
-  - 15 04 26
-- Best Before common formats:
-  - OCT 27
-  - 10/2027
-  - 03 2028
-  - End: DEC 2026
-
-Important:
-- Focus on the main product shown in the image
-- Product name should be short, clean and user-friendly
-- Do not include category
-- Notes should be brief and practical
-
-If the image is mainly the front of a product, return:
+Return:
 {
   "scanType": "product",
   "itemName": "string",
   "notes": "short note"
 }
 
-If the image is mainly an expiry/date image, return:
+2. EXPIRY SCAN
+Return:
 {
   "scanType": "expiry",
-  "rawDateText": "exact visible date text only",
+  "rawDateText": "exact visible expiry/best-before/use-by date text only",
   "dateLabel": "use_by|best_before|printed_date|unknown",
   "notes": "short note"
 }
+
+Important expiry rules:
+- Focus on the printed food date, not batch codes or times.
+- If the label says "Best if used by", use "best_before".
+- If the label says "Best when used by", use "best_before".
+- If the label says "Use by", use "use_by".
+- If no label is clear, use "printed_date".
+- Extract compact dates exactly, including formats like:
+  - 21 MAR2027
+  - 21MAR2027
+  - 21 MAR 2027
+  - 05OCT26
+  - OCT 27
+  - 10/2027
+  - 15/04/26
+  - 03/21/2027
+
+For the image example "BEST If Used By 21 MAR2027 BU1155 08":
+- rawDateText should be "21 MAR2027"
+- dateLabel should be "best_before"
+- ignore "BU1155 08"
+
+Do not include product category.
 `;
 
     const response = await client.responses.create({
@@ -424,18 +452,14 @@ If the image is mainly an expiry/date image, return:
     const parsed = safeJsonParse(text);
 
     if (parsed.scanType === "product") {
-      const itemName = String(parsed.itemName || "").trim();
-
       return res.json({
-        itemName,
+        itemName: String(parsed.itemName || "").trim(),
         notes: String(parsed.notes || "").trim(),
       });
     }
 
     const rawDateText = String(parsed.rawDateText || "").trim();
-    const dateLabel = String(parsed.dateLabel || "unknown")
-      .trim()
-      .toLowerCase();
+    const dateLabel = String(parsed.dateLabel || "unknown").trim().toLowerCase();
 
     const normalized = normalizeDateFromText(rawDateText, dateLabel);
 
@@ -477,17 +501,9 @@ You are a helpful cooking assistant.
 Create 3 simple recipe ideas using these ingredients/items:
 ${cleanedItems.join(", ")}
 
-Rules:
-- Return VALID JSON ONLY
-- No markdown
-- No code fences
-- Keep recipes realistic and simple
-- Use British wording where sensible
-- Each recipe must have:
-  - title
-  - description
-  - ingredients (array of strings)
-  - steps (array of strings)
+Return VALID JSON ONLY.
+No markdown.
+No code fences.
 
 Return exactly:
 {
@@ -495,8 +511,8 @@ Return exactly:
     {
       "title": "Recipe title",
       "description": "Short description",
-      "ingredients": ["ingredient 1", "ingredient 2"],
-      "steps": ["step 1", "step 2"]
+      "ingredients": ["ingredient 1"],
+      "steps": ["step 1"]
     }
   ]
 }
@@ -526,7 +542,6 @@ app.post("/api/delete-account", async (req, res) => {
     const user = await getUserFromBearerToken(req);
     const userId = user.id;
 
-    // Delete user's inventory items first
     const { error: deleteItemsError } = await supabaseAdmin
       .from("items")
       .delete()
@@ -536,14 +551,11 @@ app.post("/api/delete-account", async (req, res) => {
       throw new Error(deleteItemsError.message || "Failed to delete items.");
     }
 
-    // Delete auth user last
     const { error: deleteUserError } =
       await supabaseAdmin.auth.admin.deleteUser(userId);
 
     if (deleteUserError) {
-      throw new Error(
-        deleteUserError.message || "Failed to delete auth user."
-      );
+      throw new Error(deleteUserError.message || "Failed to delete auth user.");
     }
 
     return res.json({
