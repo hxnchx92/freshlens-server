@@ -12,6 +12,7 @@ app.use(express.json({ limit: "25mb" }));
 
 const PORT = process.env.PORT || 3001;
 const MODEL = process.env.OPENAI_VISION_MODEL || "gpt-4.1-mini";
+const RECIPE_MODEL = process.env.OPENAI_RECIPE_MODEL || "gpt-4.1-nano";
 
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -122,6 +123,8 @@ function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
 
   text = text
     .replace(/BEST\s*(IF\s*)?(USED\s*)?BY/g, " ")
+    .replace(/BEST\s*WHEN\s*USED\s*BY/g, " ")
+    .replace(/BEST\s*BEFORE/g, " ")
     .replace(/USE\s*BY/g, " ")
     .replace(/USED\s*BY/g, " ")
     .replace(/EXPIRY/g, " ")
@@ -146,11 +149,13 @@ function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
 
   let m;
 
-  // 1) 21 MAR2027 / 21MAR2027 / 21 MAR 2027
-  m = text.match(/\b(\d{1,2})\s*([A-Z]{3,9})\s*(20\d{2}|\d{2})\b/);
+  m = text.match(
+    /\b(\d{1,2})\s*(0CT|OCT|JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|NOV|DEC|[A-Z]{3,9})\s*(20\d{2}|\d{2})\b/
+  );
   if (m) {
     const day = String(m[1]).padStart(2, "0");
-    const month = monthNameToNumber(m[2]);
+    const monthText = String(m[2]).replace("0CT", "OCT");
+    const month = monthNameToNumber(monthText);
     let year = String(m[3]);
 
     if (year.length === 2) year = `20${year}`;
@@ -170,7 +175,6 @@ function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
     }
   }
 
-  // 2) MAR 21 2027 / MAR21 2027
   m = text.match(/\b([A-Z]{3,9})\s*(\d{1,2})\s*(20\d{2}|\d{2})\b/);
   if (m) {
     const month = monthNameToNumber(m[1]);
@@ -189,7 +193,6 @@ function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
     }
   }
 
-  // 3) ISO: 2027-03-21 / 2027/03/21
   m = text.match(/\b(20\d{2})[\/\-.](\d{1,2})[\/\-.](\d{1,2})\b/);
   if (m) {
     const year = String(m[1]);
@@ -206,7 +209,6 @@ function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
     }
   }
 
-  // 4) UK/US numeric: 21/03/27 or 03/21/27
   m = text.match(/\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})\b/);
   if (m) {
     const first = Number(m[1]);
@@ -239,7 +241,6 @@ function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
     }
   }
 
-  // 5) Spaced numeric: 21 03 27
   m = text.match(/\b(\d{1,2})\s+(\d{1,2})\s+(20\d{2}|\d{2})\b/);
   if (m) {
     const day = String(m[1]).padStart(2, "0");
@@ -258,7 +259,6 @@ function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
     }
   }
 
-  // 6) 21 MAR with no year
   m = text.match(/\b(\d{1,2})\s*([A-Z]{3,9})\b/);
   if (m) {
     const day = String(m[1]).padStart(2, "0");
@@ -278,7 +278,6 @@ function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
     }
   }
 
-  // 7) MAR 2027 / MAR27 / OCT26
   m = text.match(/\b([A-Z]{3,9})\s*(20\d{2}|\d{2})\b/);
   if (m) {
     const month = monthNameToNumber(m[1]);
@@ -298,7 +297,6 @@ function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
     }
   }
 
-  // 8) MM/YYYY or MM-YYYY
   m = text.match(/\b(\d{1,2})[\/\-.](20\d{2})\b/);
   if (m) {
     const month = String(m[1]).padStart(2, "0");
@@ -312,26 +310,6 @@ function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
         expiryDateISO: toIso(year, month, lastDay),
         partialDateText: `${month}/${year}`,
         notes: "Month/year numeric format found. End of month assumed.",
-      };
-    }
-  }
-
-  // 9) Codes like 05OCT26 / 050CT26
-  m = text.match(/\b(\d{1,2})\s*(0CT|OCT|JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|NOV|DEC)\s*(\d{2,4})\b/);
-  if (m) {
-    const day = String(m[1]).padStart(2, "0");
-    const monthText = m[2].replace("0CT", "OCT");
-    const month = monthNameToNumber(monthText);
-    let year = String(m[3]);
-
-    if (year.length === 2) year = `20${year}`;
-
-    if (month && isValidYMD(year, month, day)) {
-      return {
-        rawDateText: original,
-        expiryDateISO: toIso(year, month, day),
-        partialDateText: "",
-        notes: "Printed date code found.",
       };
     }
   }
@@ -376,60 +354,130 @@ app.get("/", (req, res) => {
 
 app.post("/api/scan-grocery", async (req, res) => {
   try {
-    const { imageBase64 } = req.body || {};
+    const { imageBase64, scanMode } = req.body || {};
 
     if (!imageBase64) {
       return res.status(400).json({ error: "imageBase64 is required." });
     }
 
     const prompt = `
-You are extracting grocery information from a product photo.
+You are FreshLens AI. Extract grocery product information from the image.
 
 Return VALID JSON ONLY.
 No markdown.
 No code fences.
 
-There are two scan types:
+The app scanMode is: "${scanMode || "unknown"}".
 
-1. PRODUCT SCAN
-Return:
-{
-  "scanType": "product",
-  "itemName": "string",
-  "notes": "short note"
-}
+CRITICAL PRIORITY RULE:
+If scanMode is "product", your FIRST priority is the PRODUCT NAME.
+You must look for the largest / most consumer-facing product name or brand + product name on the packaging.
+Do NOT focus only on the expiry date.
+Do NOT return expiry-only if any product name or brand/product title is visible.
 
-2. EXPIRY SCAN
-Return:
+When scanMode is "product":
+Return one of these:
+
+A) If product name AND expiry/date are visible:
 {
-  "scanType": "expiry",
+  "scanType": "combined",
+  "itemName": "clean product name",
   "rawDateText": "exact visible expiry/best-before/use-by date text only",
   "dateLabel": "use_by|best_before|printed_date|unknown",
   "notes": "short note"
 }
 
-Important expiry rules:
+B) If product name is visible but no expiry/date is readable:
+{
+  "scanType": "product",
+  "itemName": "clean product name",
+  "notes": "short note"
+}
+
+C) Only if NO product name or brand/product title is visible, but a date is visible:
+{
+  "scanType": "expiry",
+  "rawDateText": "exact visible expiry/best-before/use-by date text only",
+  "dateLabel": "use_by|best_before|printed_date|unknown",
+  "notes": "product name not visible"
+}
+
+When scanMode is "expiry":
+Your first priority is the printed expiry/use-by/best-before date.
+If product name is also visible, include it and return combined.
+If only date is visible, return expiry.
+
+DATE RULES:
 - Focus on the printed food date, not batch codes or times.
+- Ignore batch codes.
+- Ignore lot codes.
+- Ignore timestamps.
+- Ignore manufacturing codes.
+- Ignore serial numbers.
 - If the label says "Best if used by", use "best_before".
 - If the label says "Best when used by", use "best_before".
+- If the label says "Best before", use "best_before".
 - If the label says "Use by", use "use_by".
-- If no label is clear, use "printed_date".
-- Extract compact dates exactly, including formats like:
-  - 21 MAR2027
-  - 21MAR2027
-  - 21 MAR 2027
-  - 05OCT26
-  - OCT 27
-  - 10/2027
-  - 15/04/26
-  - 03/21/2027
+- If no label is clear but a date is visible, use "printed_date".
 
-For the image example "BEST If Used By 21 MAR2027 BU1155 08":
-- rawDateText should be "21 MAR2027"
-- dateLabel should be "best_before"
-- ignore "BU1155 08"
+Recognise date formats like:
+- 21 MAR2027
+- 21MAR2027
+- 21 MAR 2027
+- 05OCT26
+- OCT 27
+- 10/2027
+- 15/04/26
+- 03/21/2027
 
-Do not include product category.
+PRODUCT NAME RULES:
+- Extract the most likely consumer-facing grocery item name.
+- Prefer the main product title on the package over small text near the expiry date.
+- Keep itemName short and clean.
+- Do not include weight, barcode, batch number, expiry date, or storage instructions.
+- If a brand and product title are both visible, include both only if it helps identify the item.
+- Do not invent a product name if truly unreadable.
+
+EXAMPLES:
+
+Image shows:
+Lucky Charms
+BEST If Used By 21 MAR2027 BU1155 08
+
+Return:
+{
+  "scanType": "combined",
+  "itemName": "Lucky Charms",
+  "rawDateText": "21 MAR2027",
+  "dateLabel": "best_before",
+  "notes": ""
+}
+
+Image shows:
+Tesco Semi Skimmed Milk
+Use By 15 APR
+
+Return:
+{
+  "scanType": "combined",
+  "itemName": "Tesco Semi Skimmed Milk",
+  "rawDateText": "15 APR",
+  "dateLabel": "use_by",
+  "notes": ""
+}
+
+Image shows only:
+Use By 15 APR
+
+Return:
+{
+  "scanType": "expiry",
+  "rawDateText": "15 APR",
+  "dateLabel": "use_by",
+  "notes": "product name not visible"
+}
+
+Return JSON only.
 `;
 
     const response = await client.responses.create({
@@ -450,20 +498,43 @@ Do not include product category.
 
     const text = response.output_text || "";
     const parsed = safeJsonParse(text);
+    const scanType = String(parsed.scanType || "unknown").trim().toLowerCase();
 
-    if (parsed.scanType === "product") {
+    if (scanType === "product") {
       return res.json({
+        scanType: "product",
         itemName: String(parsed.itemName || "").trim(),
         notes: String(parsed.notes || "").trim(),
+        rawDateText: "",
+        partialDateText: "",
+        expiryDateISO: "",
+        dateLabel: "unknown",
+      });
+    }
+
+    if (scanType === "combined") {
+      const rawDateText = String(parsed.rawDateText || "").trim();
+      const dateLabel = String(parsed.dateLabel || "unknown").trim().toLowerCase();
+      const normalized = normalizeDateFromText(rawDateText, dateLabel);
+
+      return res.json({
+        scanType: "combined",
+        itemName: String(parsed.itemName || "").trim(),
+        rawDateText: normalized.rawDateText,
+        partialDateText: normalized.partialDateText,
+        expiryDateISO: normalized.expiryDateISO,
+        dateLabel,
+        notes: normalized.notes || String(parsed.notes || "").trim(),
       });
     }
 
     const rawDateText = String(parsed.rawDateText || "").trim();
     const dateLabel = String(parsed.dateLabel || "unknown").trim().toLowerCase();
-
     const normalized = normalizeDateFromText(rawDateText, dateLabel);
 
     return res.json({
+      scanType: "expiry",
+      itemName: String(parsed.itemName || "").trim(),
       rawDateText: normalized.rawDateText,
       partialDateText: normalized.partialDateText,
       expiryDateISO: normalized.expiryDateISO,
@@ -498,12 +569,17 @@ app.post("/api/recipes", async (req, res) => {
     const prompt = `
 You are a helpful cooking assistant.
 
-Create 3 simple recipe ideas using these ingredients/items:
+Create 2 quick, realistic recipe ideas using these ingredients/items:
 ${cleanedItems.join(", ")}
 
-Return VALID JSON ONLY.
-No markdown.
-No code fences.
+Rules:
+- Return VALID JSON ONLY.
+- No markdown.
+- No code fences.
+- Make recipes realistic and appetising.
+- Avoid weird product-name recipe titles.
+- Use common home ingredients where helpful.
+- Keep steps short.
 
 Return exactly:
 {
@@ -519,7 +595,7 @@ Return exactly:
 `;
 
     const response = await client.responses.create({
-      model: MODEL,
+      model: RECIPE_MODEL,
       input: prompt,
     });
 
