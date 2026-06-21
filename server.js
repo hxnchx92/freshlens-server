@@ -12,7 +12,7 @@ app.use(express.json({ limit: "25mb" }));
 
 const PORT = process.env.PORT || 3001;
 const MODEL = process.env.OPENAI_VISION_MODEL || "gpt-4.1-mini";
-const RECIPE_MODEL = process.env.OPENAI_RECIPE_MODEL || "gpt-4.1-nano";
+const RECIPE_MODEL = process.env.OPENAI_RECIPE_MODEL || "gpt-4.1-mini";
 
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -240,355 +240,90 @@ function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
       };
     }
   }
-
-  m = text.match(/\b(\d{1,2})\s+(\d{1,2})\s+(20\d{2}|\d{2})\b/);
-  if (m) {
-    const day = String(m[1]).padStart(2, "0");
-    const month = String(m[2]).padStart(2, "0");
-    let year = String(m[3]);
-
-    if (year.length === 2) year = `20${year}`;
-
-    if (isValidYMD(year, month, day)) {
-      return {
-        rawDateText: original,
-        expiryDateISO: toIso(year, month, day),
-        partialDateText: "",
-        notes: "Spaced numeric date found.",
-      };
-    }
-  }
-
-  m = text.match(/\b(\d{1,2})\s*([A-Z]{3,9})\b/);
-  if (m) {
-    const day = String(m[1]).padStart(2, "0");
-    const month = monthNameToNumber(m[2]);
-
-    if (month) {
-      const year = pickFutureOrCurrentYear(month, day);
-
-      if (isValidYMD(year, month, day)) {
-        return {
-          rawDateText: original,
-          expiryDateISO: toIso(year, month, day),
-          partialDateText: "",
-          notes: "Day and month found. Year assumed.",
-        };
-      }
-    }
-  }
-
-  m = text.match(/\b([A-Z]{3,9})\s*(20\d{2}|\d{2})\b/);
-  if (m) {
-    const month = monthNameToNumber(m[1]);
-    let year = String(m[2]);
-
-    if (year.length === 2) year = `20${year}`;
-
-    if (month) {
-      const lastDay = daysInMonth(year, month);
-
-      return {
-        rawDateText: original,
-        expiryDateISO: toIso(year, month, lastDay),
-        partialDateText: `${m[1]} ${year}`,
-        notes: "Month/year found. End of month assumed.",
-      };
-    }
-  }
-
-  m = text.match(/\b(\d{1,2})[\/\-.](20\d{2})\b/);
-  if (m) {
-    const month = String(m[1]).padStart(2, "0");
-    const year = String(m[2]);
-
-    if (Number(month) >= 1 && Number(month) <= 12) {
-      const lastDay = daysInMonth(year, month);
-
-      return {
-        rawDateText: original,
-        expiryDateISO: toIso(year, month, lastDay),
-        partialDateText: `${month}/${year}`,
-        notes: "Month/year numeric format found. End of month assumed.",
-      };
-    }
-  }
-
-  return {
-    rawDateText: original,
-    expiryDateISO: "",
-    partialDateText: original,
-    notes: "Date format is unclear or incomplete.",
-  };
-}
-
-async function getUserFromBearerToken(req) {
-  const authHeader = req.headers.authorization || "";
-  const token = authHeader.startsWith("Bearer ")
-    ? authHeader.slice(7).trim()
-    : "";
-
-  if (!token) {
-    throw new Error("Missing access token.");
-  }
-
-  const {
-    data: { user },
-    error,
-  } = await supabase.auth.getUser(token);
-
-  if (error) {
-    throw new Error(error.message || "Invalid access token.");
-  }
-
-  if (!user?.id) {
-    throw new Error("User not found from token.");
-  }
-
-  return user;
-}
-
-app.get("/", (req, res) => {
-  res.json({ ok: true, message: "FreshLens server running" });
-});
-
-app.post("/api/scan-grocery", async (req, res) => {
-  try {
-    const { imageBase64, scanMode } = req.body || {};
-
-    if (!imageBase64) {
-      return res.status(400).json({ error: "imageBase64 is required." });
-    }
-
-    const prompt = `
-You are FreshLens AI. Extract grocery product information from the image.
-
-Return VALID JSON ONLY.
-No markdown.
-No code fences.
-
-The app scanMode is: "${scanMode || "unknown"}".
-
-CRITICAL PRIORITY RULE:
-If scanMode is "product", your FIRST priority is the PRODUCT NAME.
-You must look for the largest / most consumer-facing product name or brand + product name on the packaging.
-Do NOT focus only on the expiry date.
-Do NOT return expiry-only if any product name or brand/product title is visible.
-
-When scanMode is "product":
-Return one of these:
-
-A) If product name AND expiry/date are visible:
-{
-  "scanType": "combined",
-  "itemName": "clean product name",
-  "rawDateText": "exact visible expiry/best-before/use-by date text only",
-  "dateLabel": "use_by|best_before|printed_date|unknown",
-  "notes": "short note"
-}
-
-B) If product name is visible but no expiry/date is readable:
-{
-  "scanType": "product",
-  "itemName": "clean product name",
-  "notes": "short note"
-}
-
-C) Only if NO product name or brand/product title is visible, but a date is visible:
-{
-  "scanType": "expiry",
-  "rawDateText": "exact visible expiry/best-before/use-by date text only",
-  "dateLabel": "use_by|best_before|printed_date|unknown",
-  "notes": "product name not visible"
-}
-
-When scanMode is "expiry":
-Your first priority is the printed expiry/use-by/best-before date.
-If product name is also visible, include it and return combined.
-If only date is visible, return expiry.
-
-DATE RULES:
-- Focus on the printed food date, not batch codes or times.
-- Ignore batch codes.
-- Ignore lot codes.
-- Ignore timestamps.
-- Ignore manufacturing codes.
-- Ignore serial numbers.
-- If the label says "Best if used by", use "best_before".
-- If the label says "Best when used by", use "best_before".
-- If the label says "Best before", use "best_before".
-- If the label says "Use by", use "use_by".
-- If no label is clear but a date is visible, use "printed_date".
-
-Recognise date formats like:
-- 21 MAR2027
-- 21MAR2027
-- 21 MAR 2027
-- 05OCT26
-- OCT 27
-- 10/2027
-- 15/04/26
-- 03/21/2027
-
-PRODUCT NAME RULES:
-- Extract the most likely consumer-facing grocery item name.
-- Prefer the main product title on the package over small text near the expiry date.
-- Keep itemName short and clean.
-- Do not include weight, barcode, batch number, expiry date, or storage instructions.
-- If a brand and product title are both visible, include both only if it helps identify the item.
-- Do not invent a product name if truly unreadable.
-
-EXAMPLES:
-
-Image shows:
-Lucky Charms
-BEST If Used By 21 MAR2027 BU1155 08
-
-Return:
-{
-  "scanType": "combined",
-  "itemName": "Lucky Charms",
-  "rawDateText": "21 MAR2027",
-  "dateLabel": "best_before",
-  "notes": ""
-}
-
-Image shows:
-Tesco Semi Skimmed Milk
-Use By 15 APR
-
-Return:
-{
-  "scanType": "combined",
-  "itemName": "Tesco Semi Skimmed Milk",
-  "rawDateText": "15 APR",
-  "dateLabel": "use_by",
-  "notes": ""
-}
-
-Image shows only:
-Use By 15 APR
-
-Return:
-{
-  "scanType": "expiry",
-  "rawDateText": "15 APR",
-  "dateLabel": "use_by",
-  "notes": "product name not visible"
-}
-
-Return JSON only.
-`;
-
-    const response = await client.responses.create({
-      model: MODEL,
-      input: [
-        {
-          role: "user",
-          content: [
-            { type: "input_text", text: prompt },
-            {
-              type: "input_image",
-              image_url: `data:image/jpeg;base64,${imageBase64}`,
-            },
-          ],
-        },
-      ],
-    });
-
-    const text = response.output_text || "";
-    const parsed = safeJsonParse(text);
-    const scanType = String(parsed.scanType || "unknown").trim().toLowerCase();
-
-    if (scanType === "product") {
-      return res.json({
-        scanType: "product",
-        itemName: String(parsed.itemName || "").trim(),
-        notes: String(parsed.notes || "").trim(),
-        rawDateText: "",
-        partialDateText: "",
-        expiryDateISO: "",
-        dateLabel: "unknown",
-      });
-    }
-
-    if (scanType === "combined") {
-      const rawDateText = String(parsed.rawDateText || "").trim();
-      const dateLabel = String(parsed.dateLabel || "unknown").trim().toLowerCase();
-      const normalized = normalizeDateFromText(rawDateText, dateLabel);
-
-      return res.json({
-        scanType: "combined",
-        itemName: String(parsed.itemName || "").trim(),
-        rawDateText: normalized.rawDateText,
-        partialDateText: normalized.partialDateText,
-        expiryDateISO: normalized.expiryDateISO,
-        dateLabel,
-        notes: normalized.notes || String(parsed.notes || "").trim(),
-      });
-    }
-
-    const rawDateText = String(parsed.rawDateText || "").trim();
-    const dateLabel = String(parsed.dateLabel || "unknown").trim().toLowerCase();
-    const normalized = normalizeDateFromText(rawDateText, dateLabel);
-
-    return res.json({
-      scanType: "expiry",
-      itemName: String(parsed.itemName || "").trim(),
-      rawDateText: normalized.rawDateText,
-      partialDateText: normalized.partialDateText,
-      expiryDateISO: normalized.expiryDateISO,
-      dateLabel,
-      notes: normalized.notes || String(parsed.notes || "").trim(),
-    });
-  } catch (error) {
-    console.error("scan-grocery error:", error?.message || error);
-    return res.status(500).json({
-      error: error?.message || "Failed to scan grocery item.",
-    });
-  }
-});
-
 app.post("/api/recipes", async (req, res) => {
   try {
-    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    const items = Array.isArray(req.body?.items)
+      ? req.body.items
+      : [];
+
+    const previousRecipes = Array.isArray(req.body?.previousRecipes)
+      ? req.body.previousRecipes
+      : [];
 
     if (!items.length) {
-      return res.status(400).json({ error: "No items provided." });
+      return res.status(400).json({
+        error: "No items provided.",
+      });
     }
 
     const cleanedItems = items
       .map((item) => String(item || "").trim())
       .filter(Boolean)
-      .slice(0, 10);
+      .slice(0, 15);
 
-    if (!cleanedItems.length) {
-      return res.status(400).json({ error: "No valid items provided." });
-    }
+    const cleanedPreviousRecipes = previousRecipes
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+      .slice(0, 50);
+
+    const previousRecipeText =
+      cleanedPreviousRecipes.length > 0
+        ? `
+DO NOT return any of these recipes:
+
+${cleanedPreviousRecipes.join("\n")}
+`
+        : "";
 
     const prompt = `
-You are a helpful cooking assistant.
+You are a professional chef and meal planner.
 
-Create 2 quick, realistic recipe ideas using these ingredients/items:
+Using these ingredients:
+
 ${cleanedItems.join(", ")}
 
-Rules:
-- Return VALID JSON ONLY.
-- No markdown.
-- No code fences.
-- Make recipes realistic and appetising.
-- Avoid weird product-name recipe titles.
-- Use common home ingredients where helpful.
-- Keep steps short.
+${previousRecipeText}
 
-Return exactly:
+Create EXACTLY 6 REALISTIC recipes.
+
+IMPORTANT:
+
+- Recipes must be real dishes people actually cook.
+- Recipes must feel like recipes from BBC Good Food, Jamie Oliver, Tesco, Waitrose, AllRecipes or similar.
+- Do not invent weird recipes.
+- Do not create fake recipe names.
+- Use UK cooking style.
+- Use common pantry ingredients where needed.
+- Include:
+  - quick meal
+  - healthy meal
+  - comfort food
+  - family meal
+  - lunch idea
+  - leftover idea
+
+Rules:
+
+- Recipe titles must be realistic.
+- Ingredients must be detailed.
+- Steps must be detailed.
+- 5-10 ingredients.
+- 4-8 steps.
+- Return EXACTLY 6 recipes.
+
+Return ONLY valid JSON.
+
 {
   "recipes": [
     {
       "title": "Recipe title",
       "description": "Short description",
-      "ingredients": ["ingredient 1"],
-      "steps": ["step 1"]
+      "ingredients": [
+        "ingredient"
+      ],
+      "steps": [
+        "step"
+      ]
     }
   ]
 }
@@ -603,49 +338,17 @@ Return exactly:
     const parsed = safeJsonParse(text);
 
     return res.json({
-      recipes: Array.isArray(parsed?.recipes) ? parsed.recipes : [],
+      recipes: Array.isArray(parsed?.recipes)
+        ? parsed.recipes.slice(0, 6)
+        : [],
     });
   } catch (error) {
     console.error("recipes error:", error?.message || error);
+
     return res.status(500).json({
-      error: error?.message || "Failed to generate recipes.",
+      error:
+        error?.message ||
+        "Failed to generate recipes.",
     });
   }
-});
-
-app.post("/api/delete-account", async (req, res) => {
-  try {
-    const user = await getUserFromBearerToken(req);
-    const userId = user.id;
-
-    const { error: deleteItemsError } = await supabaseAdmin
-      .from("items")
-      .delete()
-      .eq("user_id", userId);
-
-    if (deleteItemsError) {
-      throw new Error(deleteItemsError.message || "Failed to delete items.");
-    }
-
-    const { error: deleteUserError } =
-      await supabaseAdmin.auth.admin.deleteUser(userId);
-
-    if (deleteUserError) {
-      throw new Error(deleteUserError.message || "Failed to delete auth user.");
-    }
-
-    return res.json({
-      ok: true,
-      message: "Account deleted successfully.",
-    });
-  } catch (error) {
-    console.error("delete-account error:", error?.message || error);
-    return res.status(500).json({
-      error: error?.message || "Failed to delete account.",
-    });
-  }
-});
-
-app.listen(PORT, () => {
-  console.log(`FreshLens server running on port ${PORT}`);
 });
