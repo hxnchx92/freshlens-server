@@ -12,7 +12,7 @@ app.use(express.json({ limit: "25mb" }));
 
 const PORT = process.env.PORT || 3001;
 const MODEL = process.env.OPENAI_VISION_MODEL || "gpt-4.1-mini";
-const RECIPE_MODEL = process.env.OPENAI_RECIPE_MODEL || "gpt-4.1-nano";
+const RECIPE_MODEL = process.env.OPENAI_RECIPE_MODEL || "gpt-4.1-mini";
 
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -152,6 +152,7 @@ function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
   m = text.match(
     /\b(\d{1,2})\s*(0CT|OCT|JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|SEPT|NOV|DEC|[A-Z]{3,9})\s*(20\d{2}|\d{2})\b/
   );
+
   if (m) {
     const day = String(m[1]).padStart(2, "0");
     const monthText = String(m[2]).replace("0CT", "OCT");
@@ -176,6 +177,7 @@ function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
   }
 
   m = text.match(/\b([A-Z]{3,9})\s*(\d{1,2})\s*(20\d{2}|\d{2})\b/);
+
   if (m) {
     const month = monthNameToNumber(m[1]);
     const day = String(m[2]).padStart(2, "0");
@@ -194,6 +196,7 @@ function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
   }
 
   m = text.match(/\b(20\d{2})[\/\-.](\d{1,2})[\/\-.](\d{1,2})\b/);
+
   if (m) {
     const year = String(m[1]);
     const month = String(m[2]).padStart(2, "0");
@@ -210,6 +213,7 @@ function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
   }
 
   m = text.match(/\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})\b/);
+
   if (m) {
     const first = Number(m[1]);
     const second = Number(m[2]);
@@ -242,6 +246,7 @@ function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
   }
 
   m = text.match(/\b(\d{1,2})\s+(\d{1,2})\s+(20\d{2}|\d{2})\b/);
+
   if (m) {
     const day = String(m[1]).padStart(2, "0");
     const month = String(m[2]).padStart(2, "0");
@@ -260,6 +265,7 @@ function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
   }
 
   m = text.match(/\b(\d{1,2})\s*([A-Z]{3,9})\b/);
+
   if (m) {
     const day = String(m[1]).padStart(2, "0");
     const month = monthNameToNumber(m[2]);
@@ -279,6 +285,7 @@ function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
   }
 
   m = text.match(/\b([A-Z]{3,9})\s*(20\d{2}|\d{2})\b/);
+
   if (m) {
     const month = monthNameToNumber(m[1]);
     let year = String(m[2]);
@@ -298,6 +305,7 @@ function normalizeDateFromText(rawDateText = "", dateLabel = "unknown") {
   }
 
   m = text.match(/\b(\d{1,2})[\/\-.](20\d{2})\b/);
+
   if (m) {
     const month = String(m[1]).padStart(2, "0");
     const year = String(m[2]);
@@ -351,7 +359,6 @@ async function getUserFromBearerToken(req) {
 app.get("/", (req, res) => {
   res.json({ ok: true, message: "FreshLens server running" });
 });
-
 app.post("/api/scan-grocery", async (req, res) => {
   try {
     const { imageBase64, scanMode } = req.body || {};
@@ -438,45 +445,6 @@ PRODUCT NAME RULES:
 - If a brand and product title are both visible, include both only if it helps identify the item.
 - Do not invent a product name if truly unreadable.
 
-EXAMPLES:
-
-Image shows:
-Lucky Charms
-BEST If Used By 21 MAR2027 BU1155 08
-
-Return:
-{
-  "scanType": "combined",
-  "itemName": "Lucky Charms",
-  "rawDateText": "21 MAR2027",
-  "dateLabel": "best_before",
-  "notes": ""
-}
-
-Image shows:
-Tesco Semi Skimmed Milk
-Use By 15 APR
-
-Return:
-{
-  "scanType": "combined",
-  "itemName": "Tesco Semi Skimmed Milk",
-  "rawDateText": "15 APR",
-  "dateLabel": "use_by",
-  "notes": ""
-}
-
-Image shows only:
-Use By 15 APR
-
-Return:
-{
-  "scanType": "expiry",
-  "rawDateText": "15 APR",
-  "dateLabel": "use_by",
-  "notes": "product name not visible"
-}
-
 Return JSON only.
 `;
 
@@ -553,6 +521,10 @@ app.post("/api/recipes", async (req, res) => {
   try {
     const items = Array.isArray(req.body?.items) ? req.body.items : [];
 
+    const previousRecipes = Array.isArray(req.body?.previousRecipes)
+      ? req.body.previousRecipes
+      : [];
+
     if (!items.length) {
       return res.status(400).json({ error: "No items provided." });
     }
@@ -566,29 +538,56 @@ app.post("/api/recipes", async (req, res) => {
       return res.status(400).json({ error: "No valid items provided." });
     }
 
-    const prompt = `
-You are a helpful cooking assistant.
+    const previousRecipeText =
+      previousRecipes.length > 0
+        ? `
+PREVIOUS RECIPES ALREADY GENERATED:
 
-Create 2 quick, realistic recipe ideas using these ingredients/items:
+${previousRecipes.join("\n")}
+
+CRITICAL:
+- Do NOT repeat these recipes.
+- Do NOT create variations of these recipes.
+- Do NOT create similar recipes.
+- Create COMPLETELY DIFFERENT meal ideas.
+- Every recipe must have a UNIQUE title.
+`
+        : "";
+
+    const prompt = `
+You are a professional chef and meal planner.
+
+Using these ingredients:
+
 ${cleanedItems.join(", ")}
 
-Rules:
-- Return VALID JSON ONLY.
-- No markdown.
-- No code fences.
-- Make recipes realistic and appetising.
-- Avoid weird product-name recipe titles.
-- Use common home ingredients where helpful.
-- Keep steps short.
+${previousRecipeText}
 
-Return exactly:
+Create EXACTLY 10 COMPLETELY DIFFERENT recipes.
+
+IMPORTANT:
+- Do NOT repeat any previous recipe title.
+- Do NOT create variations of previous recipes.
+- Do NOT reuse the same cooking method.
+- Do NOT reuse the same meal format.
+- Every recipe must belong to a different category.
+- Use a mix of breakfast, lunch, dinner, dessert, snack, meal prep, picnic food, party food, baked goods, healthy meals, comfort food and family meals.
+- Use different cuisines where possible.
+- If an ingredient only supports a few recipe types, combine it with common household ingredients.
+- Avoid smoothies if one already exists.
+- Avoid parfaits if one already exists.
+- Avoid yogurt bowls if one already exists.
+- Every recipe title must be unique.
+- Generate genuinely different ideas, not renamed versions of the same dish.
+- Return ONLY valid JSON.
+
 {
   "recipes": [
     {
       "title": "Recipe title",
       "description": "Short description",
-      "ingredients": ["ingredient 1"],
-      "steps": ["step 1"]
+      "ingredients": ["ingredient"],
+      "steps": ["step"]
     }
   ]
 }
@@ -603,12 +602,65 @@ Return exactly:
     const parsed = safeJsonParse(text);
 
     return res.json({
-      recipes: Array.isArray(parsed?.recipes) ? parsed.recipes : [],
+      recipes: Array.isArray(parsed?.recipes)
+        ? parsed.recipes.slice(0, 6)
+        : [],
     });
   } catch (error) {
     console.error("recipes error:", error?.message || error);
     return res.status(500).json({
       error: error?.message || "Failed to generate recipes.",
+    });
+  }
+});
+
+app.post("/api/recipe-image", async (req, res) => {
+  try {
+    const title = String(req.body?.title || "").trim();
+    const description = String(req.body?.description || "").trim();
+
+    if (!title) {
+      return res.status(400).json({
+        error: "Recipe title required.",
+      });
+    }
+
+    const result = await client.images.generate({
+      model: "gpt-image-1",
+      prompt: `
+Professional food photography.
+
+Recipe title:
+${title}
+
+Description:
+${description || "A fresh homemade meal."}
+
+Style:
+- realistic food photo
+- natural lighting
+- appetising plating
+- clean kitchen or table setting
+- square image
+- no text
+- no watermark
+- no people
+`,
+      size: "1024x1024",
+    });
+
+    const imageBase64 = result?.data?.[0]?.b64_json || null;
+
+    return res.json({
+      imageUrl: imageBase64
+        ? `data:image/png;base64,${imageBase64}`
+        : null,
+    });
+  } catch (error) {
+    console.error("recipe-image error:", error?.message || error);
+
+    return res.status(500).json({
+      error: error?.message || "Failed to generate recipe image.",
     });
   }
 });
