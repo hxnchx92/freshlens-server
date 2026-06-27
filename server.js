@@ -586,6 +586,7 @@ HARD DIVERSITY RULES:
 - No two recipes may share the same core format or be renamed versions of each other.
 - If an ingredient only supports a few obvious recipes, combine it with common household staples to unlock different dishes.
 - Every recipe title must be unique and specific.
+- Keep each recipe title SHORT: maximum 5 words, no sub-clauses or "with…" descriptions.
 
 Return ONLY valid JSON in this exact shape (no markdown, no commentary):
 
