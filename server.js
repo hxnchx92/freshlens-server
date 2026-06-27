@@ -541,18 +541,28 @@ app.post("/api/recipes", async (req, res) => {
     const previousRecipeText =
       previousRecipes.length > 0
         ? `
-PREVIOUS RECIPES ALREADY GENERATED:
+PREVIOUS RECIPES ALREADY GENERATED (do NOT repeat or make variations of these):
 
 ${previousRecipes.join("\n")}
-
-CRITICAL:
-- Do NOT repeat these recipes.
-- Do NOT create variations of these recipes.
-- Do NOT create similar recipes.
-- Create COMPLETELY DIFFERENT meal ideas.
-- Every recipe must have a UNIQUE title.
 `
         : "";
+
+    // Rotate a random "angle" each call so identical ingredients don't
+    // collapse to the same default dish every time.
+    const diversityAngles = [
+      "Lead with global cuisines: Thai, Mexican, Indian, Japanese, Middle Eastern, Italian, Korean, Ethiopian.",
+      "Favour savoury dishes and main courses over sweet or breakfast options.",
+      "Focus on healthy, light meals: salads, grain bowls, soups, and fresh no-cook dishes.",
+      "Focus on comfort food and hearty family dinners from different countries.",
+      "Mix in snacks, party food, and small plates rather than full meals.",
+      "Prioritise quick no-cook or one-pan meals using minimal extra ingredients.",
+    ];
+
+    const chosenAngle =
+      diversityAngles[Math.floor(Math.random() * diversityAngles.length)];
+
+    // A random seed nudges the model away from deterministic defaults.
+    const varietySeed = Math.random().toString(36).slice(2, 8);
 
     const prompt = `
 You are a professional chef and meal planner.
@@ -563,23 +573,21 @@ ${cleanedItems.join(", ")}
 
 ${previousRecipeText}
 
-Create EXACTLY 10 COMPLETELY DIFFERENT recipes.
+Create EXACTLY 6 genuinely different recipes.
 
-IMPORTANT:
-- Do NOT repeat any previous recipe title.
-- Do NOT create variations of previous recipes.
-- Do NOT reuse the same cooking method.
-- Do NOT reuse the same meal format.
-- Every recipe must belong to a different category.
-- Use a mix of breakfast, lunch, dinner, dessert, snack, meal prep, picnic food, party food, baked goods, healthy meals, comfort food and family meals.
-- Use different cuisines where possible.
-- If an ingredient only supports a few recipe types, combine it with common household ingredients.
-- Avoid smoothies if one already exists.
-- Avoid parfaits if one already exists.
-- Avoid yogurt bowls if one already exists.
-- Every recipe title must be unique.
-- Generate genuinely different ideas, not renamed versions of the same dish.
-- Return ONLY valid JSON.
+VARIETY FOCUS FOR THIS BATCH:
+${chosenAngle}
+
+HARD DIVERSITY RULES:
+- Each recipe MUST use a different cuisine where possible (e.g. Italian, Thai, Mexican, Indian, Middle Eastern, Japanese, Korean).
+- Each recipe MUST use a different cooking method (baked, grilled, simmered, blended, raw/no-cook, pan-fried, roasted).
+- Each recipe MUST be a different meal type (breakfast, lunch, dinner, dessert, snack, drink, salad, side).
+- Do NOT default to the most obvious dish for an ingredient. For example, for strawberries do NOT keep making waffles, pancakes, or smoothies.
+- No two recipes may share the same core format or be renamed versions of each other.
+- If an ingredient only supports a few obvious recipes, combine it with common household staples to unlock different dishes.
+- Every recipe title must be unique and specific.
+
+Return ONLY valid JSON in this exact shape (no markdown, no commentary):
 
 {
   "recipes": [
@@ -591,11 +599,15 @@ IMPORTANT:
     }
   ]
 }
+
+(Variety token: ${varietySeed})
 `;
 
     const response = await client.responses.create({
       model: RECIPE_MODEL,
       input: prompt,
+      temperature: 1.0,
+      top_p: 0.95,
     });
 
     const text = response.output_text || "";
